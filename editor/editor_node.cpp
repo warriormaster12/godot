@@ -138,6 +138,7 @@
 #include "editor/node_dock.h"
 #include "editor/plugins/animation_player_editor_plugin.h"
 #include "editor/plugins/asset_library_editor_plugin.h"
+#include "editor/plugins/audio_graph_editor_plugin.h"
 #include "editor/plugins/canvas_item_editor_plugin.h"
 #include "editor/plugins/debugger_editor_plugin.h"
 #include "editor/plugins/dedicated_server_export_plugin.h"
@@ -7715,6 +7716,7 @@ EditorNode::EditorNode() {
 	add_editor_plugin(memnew(CanvasItemEditorPlugin));
 	add_editor_plugin(memnew(Node3DEditorPlugin));
 	add_editor_plugin(memnew(ScriptEditorPlugin));
+	add_editor_plugin(memnew(AudioGraphEditorPlugin));
 
 	EditorAudioBuses *audio_bus_editor = EditorAudioBuses::register_editor();
 
