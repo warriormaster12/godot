@@ -1,0 +1,320 @@
+/**************************************************************************/
+/*  audio_stream_graph.cpp                                               */
+/**************************************************************************/
+/*                         This file is part of:                          */
+/*                             GODOT ENGINE                               */
+/*                        https://godotengine.org                         */
+/**************************************************************************/
+/* Copyright (c) 2014-present Godot Engine contributors (see AUTHORS.md). */
+/* Copyright (c) 2007-2014 Juan Linietsky, Ariel Manzur.                  */
+/*                                                                        */
+/* Permission is hereby granted, free of charge, to any person obtaining  */
+/* a copy of this software and associated documentation files (the        */
+/* "Software"), to deal in the Software without restriction, including    */
+/* without limitation the rights to use, copy, modify, merge, publish,    */
+/* distribute, sublicense, and/or sell copies of the Software, and to     */
+/* permit persons to whom the Software is furnished to do so, subject to  */
+/* the following conditions:                                              */
+/*                                                                        */
+/* The above copyright notice and this permission notice shall be         */
+/* included in all copies or substantial portions of the Software.        */
+/*                                                                        */
+/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,        */
+/* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF     */
+/* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. */
+/* IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY   */
+/* CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,   */
+/* TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE      */
+/* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                 */
+/**************************************************************************/
+
+#include "audio_stream_graph.h"
+#include "audio_stream_graph_nodes.h"
+
+void AudioStreamGraph::_bind_methods() {
+}
+
+Ref<AudioStreamPlayback> AudioStreamGraph::instantiate_playback() {
+	Ref<AudioStreamPlaybackGraph> playback_graph;
+	playback_graph.instantiate();
+	preprocess_nodes();
+	playback_graph->stream = Ref<AudioStreamGraph>(this);
+	return playback_graph;
+}
+
+void AudioStreamGraph::add_node(Ref<AudioStreamGraphNode> p_node, const Vector2 &p_position, const int p_id) {
+	ERR_FAIL_COND(p_node.is_null());
+	ERR_FAIL_COND(p_id < 2);
+	ERR_FAIL_COND(nodes.has(p_id));
+	Node n;
+	n.node = p_node;
+	n.position = p_position;
+
+	emit_changed();
+	//emit_signal(SNAME("tree_changed"));
+
+	// p_node->connect(SNAME("tree_changed"), callable_mp(this, &AnimationNodeBlendTree::_tree_changed), CONNECT_REFERENCE_COUNTED);
+	// p_node->connect(SNAME("animation_node_renamed"), callable_mp(this, &AnimationNodeBlendTree::_animation_node_renamed), CONNECT_REFERENCE_COUNTED);
+	// p_node->connect(SNAME("animation_node_removed"), callable_mp(this, &AnimationNodeBlendTree::_animation_node_removed), CONNECT_REFERENCE_COUNTED);
+	// p_node->connect_changed(callable_mp(this, &AnimationNodeBlendTree::_node_changed).bind(p_name), CONNECT_REFERENCE_COUNTED);
+
+	nodes[p_id] = n;
+}
+
+Error AudioStreamGraph::connect_nodes(int p_from_node, int p_from_port, int p_to_node, int p_to_port) {
+	ERR_FAIL_COND_V(!nodes.has(p_from_node), ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(!nodes.has(p_to_node), ERR_INVALID_PARAMETER);
+	ERR_FAIL_INDEX_V(p_to_port, nodes[p_to_node].node->get_input_port_count(), ERR_INVALID_PARAMETER);
+
+	for (const Connection &E : connections) {
+		if (E.from_node == p_from_node && E.from_port == p_from_port && E.to_node == p_to_node && E.to_port == p_to_port) {
+			ERR_FAIL_V(ERR_ALREADY_EXISTS);
+		}
+	}
+
+	Connection c;
+	c.from_node = p_from_node;
+	c.from_port = p_from_port;
+	c.to_node = p_to_node;
+	c.to_port = p_to_port;
+	connections.push_back(c);
+	nodes[p_from_node].next_connected_nodes.push_back(p_to_node);
+	nodes[p_to_node].prev_connected_nodes.push_back(p_from_node);
+	nodes[p_from_node].node->set_output_port_connected(p_from_port, true);
+	nodes[p_to_node].node->set_input_port_connected(p_to_port, true);
+	nodes[p_to_node].node->connect_input_node(nodes[p_from_node].node, p_to_port);
+
+	//_queue_update();
+	return OK;
+}
+
+void AudioStreamGraph::disconnect_nodes(int p_from_node, int p_from_port, int p_to_node, int p_to_port) {
+	for (const List<Connection>::Element *E = connections.front(); E; E = E->next()) {
+		if (E->get().from_node == p_from_node && E->get().from_port == p_from_port && E->get().to_node == p_to_node && E->get().to_port == p_to_port) {
+			connections.erase(E);
+			nodes[p_from_node].next_connected_nodes.erase(p_to_node);
+			nodes[p_to_node].prev_connected_nodes.erase(p_from_node);
+			nodes[p_from_node].node->set_output_port_connected(p_from_port, false);
+			nodes[p_to_node].node->set_input_port_connected(p_to_port, false);
+			nodes[p_to_node].node->disconnect_input_node(p_to_port);
+			return;
+		}
+	}
+}
+
+void AudioStreamGraph::set_node_position(int p_id, const Vector2 &p_position) {
+	ERR_FAIL_COND(!nodes.has(p_id));
+	nodes[p_id].position = p_position;
+}
+
+Ref<AudioStreamGraphNode> AudioStreamGraph::get_node(const int p_id) const {
+	if (!nodes.has(p_id)) {
+		return Ref<AudioStreamGraphNode>();
+	}
+	ERR_FAIL_COND_V(!nodes.has(p_id), Ref<AudioStreamGraphNode>());
+	return nodes[p_id].node;
+}
+
+void AudioStreamGraph::remove_node(const int p_id) {
+	ERR_FAIL_COND(p_id < 2);
+	ERR_FAIL_COND(!nodes.has(p_id));
+
+	nodes.erase(p_id);
+
+	for (List<Connection>::Element *E = connections.front(); E;) {
+		List<Connection>::Element *N = E->next();
+		const AudioStreamGraph::Connection &connection = E->get();
+		if (connection.from_node == p_id || connection.to_node == p_id) {
+			if (connection.from_node == p_id) {
+				nodes[connection.to_node].prev_connected_nodes.erase(p_id);
+				nodes[connection.to_node].node->set_input_port_connected(connection.to_port, false);
+			} else if (connection.to_node == p_id) {
+				nodes[connection.from_node].next_connected_nodes.erase(p_id);
+				nodes[connection.from_node].node->set_output_port_connected(connection.from_port, false);
+			}
+			connections.erase(E);
+		}
+		E = N;
+	}
+}
+
+bool AudioStreamGraph::has_node(const int p_id) const {
+	return nodes.has(p_id);
+}
+
+Vector<int> AudioStreamGraph::get_node_list() const {
+	Vector<int> ret;
+	for (const KeyValue<int, Node> &E : nodes) {
+		ret.push_back(E.key);
+	}
+
+	return ret;
+}
+
+Vector2 AudioStreamGraph::get_node_position(const int p_id) const {
+	ERR_FAIL_COND_V(!nodes.has(p_id), Vector2());
+	return nodes[p_id].position;
+}
+
+int AudioStreamGraph::get_valid_node_id() {
+	return nodes.size() ? MAX(2, nodes.back()->key() + 1) : 2;
+}
+
+void AudioStreamGraph::get_node_connections(List<Connection> *r_connections) const {
+	for (const Connection &E : connections) {
+		r_connections->push_back(E);
+	}
+}
+
+Ref<AudioStream> AudioStreamGraph::preprocess_nodes() {
+	const Node *current_node = &nodes[0];
+	return current_node->node->pre_process_node();
+}
+
+AudioStreamGraph::AudioStreamGraph() {
+	Ref<AudioStreamGraphOutputNode> output;
+	output.instantiate();
+	nodes[0].node = output;
+
+	nodes[0].position = Vector2(400, 150);
+}
+
+/////
+
+void AudioStreamGraphNode::_bind_methods() {
+	ClassDB::bind_method(D_METHOD("add_node", "id", "node", "position"), &AudioStreamGraph::add_node);
+	ClassDB::bind_method(D_METHOD("get_node", "id"), &AudioStreamGraph::get_node);
+	ClassDB::bind_method(D_METHOD("remove_node", "id"), &AudioStreamGraph::remove_node);
+	ClassDB::bind_method(D_METHOD("set_node_position", "id", "position"), &AudioStreamGraph::set_node_position);
+
+	ClassDB::bind_method(D_METHOD("connect_nodes", "from_node", "from_port", "to_node", "to_port"), &AudioStreamGraph::connect_nodes);
+	ClassDB::bind_method(D_METHOD("disconnect_nodes", "from_node", "from_port", "to_node", "to_port"), &AudioStreamGraph::disconnect_nodes);
+}
+
+void AudioStreamGraphNode::set_input_port_connected(int p_port, bool p_connected) {
+	connected_input_ports[p_port] = p_connected;
+}
+
+void AudioStreamGraphNode::set_output_port_connected(int p_port, bool p_connected) {
+	if (p_connected) {
+		connected_output_ports[p_port]++;
+	} else {
+		connected_output_ports[p_port]--;
+	}
+}
+
+void AudioStreamGraphNode::connect_input_node(Ref<AudioStreamGraphNode> p_node, int p_port) {
+	if (!p_node.is_valid()) {
+		return;
+	}
+
+	connected_nodes[p_port] = p_node;
+}
+
+void AudioStreamGraphNode::disconnect_input_node(int p_port) {
+	if (!connected_nodes.has(p_port)) {
+		return;
+	}
+
+	connected_nodes.erase(p_port);
+}
+
+bool AudioStreamGraphNode::is_output_port_connected(int p_port) const {
+	if (connected_output_ports.has(p_port)) {
+		return connected_output_ports[p_port] > 0;
+	}
+	return false;
+}
+
+bool AudioStreamGraphNode::is_input_port_connected(int p_port) const {
+	if (connected_input_ports.has(p_port)) {
+		return connected_input_ports[p_port];
+	}
+	return false;
+}
+
+bool AudioStreamGraphNode::is_show_prop_names() const {
+	return false;
+}
+
+Vector<StringName> AudioStreamGraphNode::get_editable_properties() const {
+	return Vector<StringName>();
+}
+
+HashMap<StringName, String> AudioStreamGraphNode::get_editable_properties_names() const {
+	return HashMap<StringName, String>();
+}
+
+List<Ref<AudioStreamGraphNode>> AudioStreamGraphNode::get_connected_input_nodes() const {
+	List<Ref<AudioStreamGraphNode>> out_list = {};
+	for (int i = 0; i < get_input_port_count(); i++) {
+		if (connected_nodes.has(i)) {
+			out_list.push_back(connected_nodes.get(i));
+		}
+	}
+
+	return out_list;
+}
+
+bool AudioStreamGraphNode::is_deletable() const {
+	return closable;
+}
+
+void AudioStreamGraphNode::set_deletable(bool p_closable) {
+	closable = p_closable;
+}
+
+AudioStreamGraphNode::AudioStreamGraphNode() {
+}
+
+void AudioStreamPlaybackGraph::start(double p_from_pos) {
+	if (active) {
+		return;
+	}
+
+	active = true;
+	print_line("start playback");
+}
+
+void AudioStreamPlaybackGraph::stop() {
+	if (!active) {
+		return;
+	}
+
+	active = false;
+	print_line("stop playback");
+}
+
+bool AudioStreamPlaybackGraph::is_playing() const {
+	return active;
+}
+
+int AudioStreamPlaybackGraph::get_loop_count() const {
+	return 0;
+}
+
+double AudioStreamPlaybackGraph::get_playback_position() const {
+	return 0.0;
+}
+
+void AudioStreamPlaybackGraph::seek(double p_time) {
+}
+
+int AudioStreamPlaybackGraph::mix(AudioFrame *p_buffer, float p_rate_scale, int p_frames) {
+	if (!stream.is_valid()) {
+		return 0;
+	}
+	return 0;
+}
+
+void AudioStreamPlaybackGraph::tag_used_streams() {
+}
+
+void AudioStreamPlaybackGraph::set_parameter(const StringName &p_name, const Variant &p_value) {
+}
+
+Variant AudioStreamPlaybackGraph::get_parameter(const StringName &p_name) const {
+}
+
+void AudioStreamPlaybackGraph::_bind_methods() {
+}
